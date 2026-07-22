@@ -16,7 +16,7 @@ Key Features:
  - Dynamic auto-aligned table layout for all console outputs.
  - Automatic size formatting (Converts raw bytes into KB, MB, GB).
  - Native SafeArray parsing (Handles multi-value properties like IP addresses).
- - Sub-second startup time and tiny memory footprint (~300 KB executable).
+ - Sub-second startup time and tiny memory footprint.
  - Generic WQL query engine for custom WMI database queries.
 
 Command Alias Quick List:
@@ -46,7 +46,7 @@ a portable application.
 
 3. HOW TO EXECUTE
 -------------------------------------------------------------------------------
-Open Command Prompt (cmd.exe) or PowerShell, navigate to the folder containing 
+Open Command Prompt (cmd.exe) or Windows Termina;, navigate to the folder containing 
 xmic.exe, and run:
 
     xmic [--locale <WMI_LOCALE>] [--wmi-security <LEVEL>] [--format <FMT>] [--no-header] <command> [arguments]
