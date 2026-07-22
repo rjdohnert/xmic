@@ -480,26 +480,40 @@ bool ExecuteOSInfoQuery(const std::wstring& wmiLocale, const WmiSecurityConfig& 
         return value;
     };
 
+    std::wstring caption = readProp(L"Caption");
+    std::wstring version = readProp(L"Version");
+    std::wstring architecture = readProp(L"OSArchitecture");
+    std::wstring numberOfUsers = readProp(L"NumberOfUsers");
+    std::wstring installDate = readProp(L"InstallDate");
     std::wstring activationStatus = GetWindowsActivationStatus(wmiLocale, securityConfig);
 
     Table table;
-    table.headers = {
-        L"Caption",
-        L"Version",
-        L"OS Architecture",
-        L"Number of Users",
-        L"Install Date",
-        L"Activation Status"
-    };
-
-    table.rows.push_back({
-        readProp(L"Caption"),
-        readProp(L"Version"),
-        readProp(L"OSArchitecture"),
-        readProp(L"NumberOfUsers"),
-        readProp(L"InstallDate"),
-        activationStatus
-    });
+    if (g_outputOptions.format == OutputFormat::Table) {
+        table.headers = { L"Property", L"Value" };
+        table.rows.push_back({ L"System", caption });
+        table.rows.push_back({ L"Version", version });
+        table.rows.push_back({ L"OS Architecture", architecture });
+        table.rows.push_back({ L"Number of Users", numberOfUsers });
+        table.rows.push_back({ L"Install Date", installDate });
+        table.rows.push_back({ L"Activation Status", activationStatus });
+    } else {
+        table.headers = {
+            L"Caption",
+            L"Version",
+            L"OS Architecture",
+            L"Number of Users",
+            L"Install Date",
+            L"Activation Status"
+        };
+        table.rows.push_back({
+            caption,
+            version,
+            architecture,
+            numberOfUsers,
+            installDate,
+            activationStatus
+        });
+    }
 
     table.Print();
 
