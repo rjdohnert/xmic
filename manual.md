@@ -1,7 +1,6 @@
 
-`XMIC DOCUMENTATION & MANUAL`
-Windows Management Instrumentation Command-Line Tool
-Copyright (C) 2026, Roberto J Dohnert
+`XMIC DOCUMENTATION & MANUAL` Windows Management Instrumentation Command-Line Tool 
+Copyright (C) 2026, Roberto J Dohnert 
 Licensed under the terms of the BSD-3 Clause License
 
 ------------------------------------------------------------------------------
