@@ -1,3 +1,5 @@
+<img width="198" height="197" alt="xmic" src="https://github.com/user-attachments/assets/bbef0631-578b-4786-b3e7-3818d40d4404" />
+
 # xmic
 
 xmic is a Windows Management Instrumentation (WMI) command-line tool designed as a modern replacement for `wmic`.
