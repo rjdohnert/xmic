@@ -68,6 +68,20 @@ std::wstring VariantToString(VARIANT& vtProp) {
     return L"<Data>";
 }
 
+std::wstring FormatWmiDateTime(const std::wstring& wmiDateTime) {
+    // WMI CIM_DATETIME format: yyyymmddHHMMSS.mmmmmmsUUU
+    if (wmiDateTime.length() < 14) return wmiDateTime;
+
+    std::wstring year = wmiDateTime.substr(0, 4);
+    std::wstring month = wmiDateTime.substr(4, 2);
+    std::wstring day = wmiDateTime.substr(6, 2);
+    std::wstring hour = wmiDateTime.substr(8, 2);
+    std::wstring minute = wmiDateTime.substr(10, 2);
+    std::wstring second = wmiDateTime.substr(12, 2);
+
+    return year + L"-" + month + L"-" + day + L" " + hour + L":" + minute + L":" + second;
+}
+
 // Table renderer for clean aligned CLI output
 enum class OutputFormat {
     Table,
@@ -273,6 +287,229 @@ bool TryParseOutputFormat(const std::wstring& input, OutputFormat& format) {
     }
 
     return false;
+}
+
+std::wstring MapLicenseStatusCode(const std::wstring& rawValue) {
+    if (rawValue == L"0") return L"Unlicensed";
+    if (rawValue == L"1") return L"Licensed";
+    if (rawValue == L"2") return L"OOB Grace";
+    if (rawValue == L"3") return L"OOT Grace";
+    if (rawValue == L"4") return L"Non-Genuine Grace";
+    if (rawValue == L"5") return L"Notification";
+    if (rawValue == L"6") return L"Extended Grace";
+    return rawValue;
+}
+
+std::wstring GetWindowsActivationStatus(const std::wstring& wmiLocale, const WmiSecurityConfig& securityConfig) {
+    HRESULT hr = CoInitializeEx(0, COINIT_MULTITHREADED);
+    if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) {
+        return L"N/A";
+    }
+
+    CoInitializeSecurity(
+        NULL, -1, NULL, NULL,
+        securityConfig.authnLevel,
+        securityConfig.impLevel,
+        NULL, EOAC_NONE, NULL
+    );
+
+    IWbemLocator* pLoc = NULL;
+    hr = CoCreateInstance(CLSID_WbemLocator, 0, CLSCTX_INPROC_SERVER, IID_IWbemLocator, (LPVOID*)&pLoc);
+    if (FAILED(hr)) {
+        CoUninitialize();
+        return L"N/A";
+    }
+
+    IWbemServices* pSvc = NULL;
+    if (wmiLocale.empty()) {
+        hr = pLoc->ConnectServer(_bstr_t(L"ROOT\\CIMV2"), NULL, NULL, 0, NULL, 0, 0, &pSvc);
+    } else {
+        _bstr_t localeBstr(wmiLocale.c_str());
+        hr = pLoc->ConnectServer(_bstr_t(L"ROOT\\CIMV2"), NULL, NULL, localeBstr, NULL, 0, 0, &pSvc);
+    }
+    if (FAILED(hr)) {
+        pLoc->Release();
+        CoUninitialize();
+        return L"N/A";
+    }
+
+    CoSetProxyBlanket(
+        pSvc,
+        RPC_C_AUTHN_WINNT,
+        RPC_C_AUTHZ_NONE,
+        NULL,
+        securityConfig.authnLevel,
+        securityConfig.impLevel,
+        NULL,
+        EOAC_NONE
+    );
+
+    IEnumWbemClassObject* pEnumerator = NULL;
+    hr = pSvc->ExecQuery(
+        bstr_t("WQL"),
+        bstr_t(L"SELECT LicenseStatus FROM SoftwareLicensingProduct WHERE ApplicationID='55c92734-d682-4d71-983e-d6ec3f16059f' AND PartialProductKey IS NOT NULL"),
+        WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
+        NULL,
+        &pEnumerator
+    );
+
+    if (FAILED(hr)) {
+        pSvc->Release();
+        pLoc->Release();
+        CoUninitialize();
+        return L"N/A";
+    }
+
+    IWbemClassObject* pclsObj = NULL;
+    ULONG uReturn = 0;
+    hr = pEnumerator->Next(WBEM_INFINITE, 1, &pclsObj, &uReturn);
+    if (FAILED(hr) || uReturn == 0) {
+        pEnumerator->Release();
+        pSvc->Release();
+        pLoc->Release();
+        CoUninitialize();
+        return L"N/A";
+    }
+
+    VARIANT vtStatus;
+    VariantInit(&vtStatus);
+    std::wstring status = L"N/A";
+    if (SUCCEEDED(pclsObj->Get(L"LicenseStatus", 0, &vtStatus, 0, 0))) {
+        status = MapLicenseStatusCode(VariantToString(vtStatus));
+    }
+    VariantClear(&vtStatus);
+
+    pclsObj->Release();
+    pEnumerator->Release();
+    pSvc->Release();
+    pLoc->Release();
+    CoUninitialize();
+
+    return status;
+}
+
+bool ExecuteOSInfoQuery(const std::wstring& wmiLocale, const WmiSecurityConfig& securityConfig) {
+    g_lastNoData = false;
+
+    HRESULT hr = CoInitializeEx(0, COINIT_MULTITHREADED);
+    if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) {
+        std::wcerr << L"[!] COM Initialization failed." << std::endl;
+        return false;
+    }
+
+    CoInitializeSecurity(
+        NULL, -1, NULL, NULL,
+        securityConfig.authnLevel,
+        securityConfig.impLevel,
+        NULL, EOAC_NONE, NULL
+    );
+
+    IWbemLocator* pLoc = NULL;
+    hr = CoCreateInstance(CLSID_WbemLocator, 0, CLSCTX_INPROC_SERVER, IID_IWbemLocator, (LPVOID*)&pLoc);
+    if (FAILED(hr)) {
+        CoUninitialize();
+        return false;
+    }
+
+    IWbemServices* pSvc = NULL;
+    if (wmiLocale.empty()) {
+        hr = pLoc->ConnectServer(_bstr_t(L"ROOT\\CIMV2"), NULL, NULL, 0, NULL, 0, 0, &pSvc);
+    } else {
+        _bstr_t localeBstr(wmiLocale.c_str());
+        hr = pLoc->ConnectServer(_bstr_t(L"ROOT\\CIMV2"), NULL, NULL, localeBstr, NULL, 0, 0, &pSvc);
+    }
+    if (FAILED(hr)) {
+        pLoc->Release();
+        CoUninitialize();
+        return false;
+    }
+
+    CoSetProxyBlanket(
+        pSvc,
+        RPC_C_AUTHN_WINNT,
+        RPC_C_AUTHZ_NONE,
+        NULL,
+        securityConfig.authnLevel,
+        securityConfig.impLevel,
+        NULL,
+        EOAC_NONE
+    );
+
+    IEnumWbemClassObject* pEnumerator = NULL;
+    hr = pSvc->ExecQuery(
+        bstr_t("WQL"),
+        bstr_t(L"SELECT Caption, Version, OSArchitecture, NumberOfUsers, InstallDate FROM Win32_OperatingSystem"),
+        WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
+        NULL,
+        &pEnumerator
+    );
+
+    if (FAILED(hr)) {
+        pSvc->Release();
+        pLoc->Release();
+        CoUninitialize();
+        return false;
+    }
+
+    IWbemClassObject* pclsObj = NULL;
+    ULONG uReturn = 0;
+    hr = pEnumerator->Next(WBEM_INFINITE, 1, &pclsObj, &uReturn);
+    if (FAILED(hr) || uReturn == 0) {
+        g_lastNoData = true;
+        if (g_outputOptions.format == OutputFormat::Table) {
+            std::wcout << L"  No data available.\n" << std::endl;
+        }
+        pEnumerator->Release();
+        pSvc->Release();
+        pLoc->Release();
+        CoUninitialize();
+        return false;
+    }
+
+    auto readProp = [&](const wchar_t* propName) -> std::wstring {
+        VARIANT vtProp;
+        VariantInit(&vtProp);
+        std::wstring value = L"N/A";
+        if (SUCCEEDED(pclsObj->Get(propName, 0, &vtProp, 0, 0))) {
+            value = VariantToString(vtProp);
+            if (std::wstring(propName) == L"InstallDate") {
+                value = FormatWmiDateTime(value);
+            }
+        }
+        VariantClear(&vtProp);
+        return value;
+    };
+
+    std::wstring activationStatus = GetWindowsActivationStatus(wmiLocale, securityConfig);
+
+    Table table;
+    table.headers = {
+        L"Caption",
+        L"Version",
+        L"OS Architecture",
+        L"Number of Users",
+        L"Install Date",
+        L"Activation Status"
+    };
+
+    table.rows.push_back({
+        readProp(L"Caption"),
+        readProp(L"Version"),
+        readProp(L"OSArchitecture"),
+        readProp(L"NumberOfUsers"),
+        readProp(L"InstallDate"),
+        activationStatus
+    });
+
+    table.Print();
+
+    pclsObj->Release();
+    pEnumerator->Release();
+    pSvc->Release();
+    pLoc->Release();
+    CoUninitialize();
+
+    return true;
 }
 
 std::wstring HResultToHex(HRESULT hr) {
@@ -877,6 +1114,14 @@ bool ExecuteWMIQuery(
 
             if (SUCCEEDED(hr)) {
                 std::wstring val = VariantToString(vtProp);
+
+                if (prop == L"InstallDate") {
+                    val = FormatWmiDateTime(val);
+                }
+
+                if (prop == L"LicenseStatus") {
+                    val = MapLicenseStatusCode(val);
+                }
                 
                 // Format sizes if property is capacity/memory/size related
                 if (autoByteFormat && (prop == L"Size" || prop == L"FreeSpace" || prop == L"Capacity" || prop == L"WorkingSetSize")) {
@@ -1061,14 +1306,7 @@ int wmain(int argc, wchar_t* argv[]) {
     bool success = true;
 
     if (cmd == L"os") {
-        success = ExecuteWMIQuery(
-            L"SELECT Caption, Version, OSArchitecture, NumberOfUsers, LastBootUpTime FROM Win32_OperatingSystem",
-            { L"Caption", L"Version", L"OSArchitecture", L"NumberOfUsers" },
-            true,
-            wmiLocale,
-            {},
-            securityConfig
-        );
+        success = ExecuteOSInfoQuery(wmiLocale, securityConfig);
     } 
     else if (cmd == L"cpu") {
         success = ExecuteWMIQuery(

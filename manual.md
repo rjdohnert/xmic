@@ -1,5 +1,5 @@
 
-                          XMIC DOCUMENTATION & MANUAL
+                        `XMIC DOCUMENTATION & MANUAL`
                Windows Management Instrumentation Command-Line Tool
                       Copyright (C) 2026, Roberto J Dohnert
                Licensed under the terms of the BSD-3 Clause License
@@ -116,8 +116,9 @@ To view quick inline help inside the command line, run:
 [ COMMAND ]     [ PURPOSE & EXAMPLE ]
 -------------------------------------------------------------------------------
 
-os              Displays Operating System details (Edition, Version, 
-                Architecture, Registered Users).
+os              Displays Operating System details (Edition, Version,
+                Architecture, Registered Users, Install Date, and
+                Activation Status).
                 
                 Example:
                     xmic os
