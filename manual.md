@@ -33,6 +33,7 @@ Command Alias Quick List:
 | apps32  | win32apps     | Installed Win32 applications              |
 | apps64  | win64apps     | Installed Win64 applications              |
 | devices | device        | Installed Plug-and-Play devices           |
+| threads | thread        | Total running system threads              |
 | help    | --help, -h    | Show command usage and options           |
 
 
@@ -309,6 +310,15 @@ devices        Lists installed Plug-and-Play devices discovered by WMI,
 
                Example:
                    xmic devices
+
+---------------------------------------------------------------------------------
+
+threads        Displays the total number of running threads on the system
+               using WMI performance data.
+               Alias: thread
+
+               Example:
+                   xmic threads
 
 ---------------------------------------------------------------------------------
 

@@ -1131,6 +1131,111 @@ bool ExecuteDevicesInfoQuery(const std::wstring& wmiLocale, const WmiSecurityCon
     return true;
 }
 
+bool ExecuteThreadsInfoQuery(const std::wstring& wmiLocale, const WmiSecurityConfig& securityConfig) {
+    g_lastNoData = false;
+
+    HRESULT hr = CoInitializeEx(0, COINIT_MULTITHREADED);
+    if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) {
+        std::wcerr << L"[!] COM Initialization failed." << std::endl;
+        return false;
+    }
+
+    CoInitializeSecurity(
+        NULL, -1, NULL, NULL,
+        securityConfig.authnLevel,
+        securityConfig.impLevel,
+        NULL, EOAC_NONE, NULL
+    );
+
+    IWbemLocator* pLoc = NULL;
+    hr = CoCreateInstance(CLSID_WbemLocator, 0, CLSCTX_INPROC_SERVER, IID_IWbemLocator, (LPVOID*)&pLoc);
+    if (FAILED(hr)) {
+        CoUninitialize();
+        return false;
+    }
+
+    IWbemServices* pSvc = NULL;
+    if (wmiLocale.empty()) {
+        hr = pLoc->ConnectServer(_bstr_t(L"ROOT\\CIMV2"), NULL, NULL, 0, NULL, 0, 0, &pSvc);
+    } else {
+        _bstr_t localeBstr(wmiLocale.c_str());
+        hr = pLoc->ConnectServer(_bstr_t(L"ROOT\\CIMV2"), NULL, NULL, localeBstr, NULL, 0, 0, &pSvc);
+    }
+    if (FAILED(hr)) {
+        pLoc->Release();
+        CoUninitialize();
+        return false;
+    }
+
+    CoSetProxyBlanket(
+        pSvc,
+        RPC_C_AUTHN_WINNT,
+        RPC_C_AUTHZ_NONE,
+        NULL,
+        securityConfig.authnLevel,
+        securityConfig.impLevel,
+        NULL,
+        EOAC_NONE
+    );
+
+    IEnumWbemClassObject* pEnumerator = NULL;
+    hr = pSvc->ExecQuery(
+        bstr_t("WQL"),
+        bstr_t(L"SELECT Threads FROM Win32_PerfFormattedData_PerfOS_System"),
+        WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
+        NULL,
+        &pEnumerator
+    );
+
+    if (FAILED(hr)) {
+        pSvc->Release();
+        pLoc->Release();
+        CoUninitialize();
+        return false;
+    }
+
+    IWbemClassObject* pclsObj = NULL;
+    ULONG uReturn = 0;
+    hr = pEnumerator->Next(WBEM_INFINITE, 1, &pclsObj, &uReturn);
+    if (FAILED(hr) || uReturn == 0) {
+        g_lastNoData = true;
+        if (g_outputOptions.format == OutputFormat::Table) {
+            std::wcout << L"  No data available.\n" << std::endl;
+        }
+        pEnumerator->Release();
+        pSvc->Release();
+        pLoc->Release();
+        CoUninitialize();
+        return false;
+    }
+
+    VARIANT vtThreads;
+    VariantInit(&vtThreads);
+    std::wstring threads = L"N/A";
+    if (SUCCEEDED(pclsObj->Get(L"Threads", 0, &vtThreads, 0, 0))) {
+        threads = VariantToString(vtThreads);
+    }
+    VariantClear(&vtThreads);
+
+    pclsObj->Release();
+    pEnumerator->Release();
+    pSvc->Release();
+    pLoc->Release();
+    CoUninitialize();
+
+    Table table;
+    if (g_outputOptions.format == OutputFormat::Table) {
+        table.headers = { L"Property", L"Value" };
+        table.rows.push_back({ L"Running Threads", threads });
+    } else {
+        table.headers = { L"Running Threads" };
+        table.rows.push_back({ threads });
+    }
+
+    table.Print();
+    return true;
+}
+
 std::wstring HResultToHex(HRESULT hr) {
     std::wstringstream ss;
     ss << L"0x" << std::uppercase << std::hex << std::setw(8) << std::setfill(L'0') << static_cast<unsigned long>(hr);
@@ -1822,6 +1927,7 @@ void PrintHelp() {
               << L"  apps32    - Installed Win32 applications\n"
               << L"  apps64    - Installed Win64 applications\n"
               << L"  devices   - Installed Plug-and-Play devices\n"
+              << L"  threads   - Total running system threads\n"
               << L"  users     - Local user accounts\n"
               << L"  help      - Show this help message\n\n"
               << L"Help options:\n"
@@ -2126,6 +2232,9 @@ int wmain(int argc, wchar_t* argv[]) {
     }
     else if (cmd == L"devices" || cmd == L"device") {
         success = ExecuteDevicesInfoQuery(wmiLocale, securityConfig);
+    }
+    else if (cmd == L"threads" || cmd == L"thread") {
+        success = ExecuteThreadsInfoQuery(wmiLocale, securityConfig);
     }
     else if (cmd == L"users") {
         success = ExecuteWMIQuery(
