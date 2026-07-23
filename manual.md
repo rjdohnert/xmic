@@ -32,6 +32,7 @@ Command Alias Quick List:
 | port    | ports         | Physical and serial port information      |
 | apps32  | win32apps     | Installed Win32 applications              |
 | apps64  | win64apps     | Installed Win64 applications              |
+| devices | device        | Installed Plug-and-Play devices           |
 | help    | --help, -h    | Show command usage and options           |
 
 
@@ -299,6 +300,15 @@ apps64         Lists installed Win64 applications from the 64-bit
 
                Example:
                    xmic apps64
+
+---------------------------------------------------------------------------------
+
+devices        Lists installed Plug-and-Play devices discovered by WMI,
+               including device name, class, manufacturer, and status.
+               Alias: device
+
+               Example:
+                   xmic devices
 
 ---------------------------------------------------------------------------------
 

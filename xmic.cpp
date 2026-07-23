@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <sstream>
 #include <utility>
+#include <set>
 #include <cwctype>
 #include <windows.h>
 #include <comdef.h>
@@ -136,6 +137,49 @@ std::wstring EscapeCsv(const std::wstring& input) {
     return out;
 }
 
+std::vector<std::wstring> SplitAndTrimCommaList(const std::wstring& input) {
+    std::vector<std::wstring> parts;
+    std::wstringstream ss(input);
+    std::wstring item;
+
+    while (std::getline(ss, item, L',')) {
+        size_t start = 0;
+        while (start < item.size() && iswspace(item[start])) {
+            ++start;
+        }
+
+        size_t end = item.size();
+        while (end > start && iswspace(item[end - 1])) {
+            --end;
+        }
+
+        std::wstring trimmed = item.substr(start, end - start);
+        if (!trimmed.empty()) {
+            parts.push_back(trimmed);
+        }
+    }
+
+    return parts;
+}
+
+std::wstring NormalizeForKey(const std::wstring& input) {
+    std::wstring value = input;
+    std::transform(value.begin(), value.end(), value.begin(), towlower);
+    return value;
+}
+
+std::wstring BuildDeviceDedupKey(
+    const std::wstring& name,
+    const std::wstring& deviceClass,
+    const std::wstring& manufacturer,
+    const std::wstring& status
+) {
+    return NormalizeForKey(name) + L"\x1f" +
+           NormalizeForKey(deviceClass) + L"\x1f" +
+           NormalizeForKey(manufacturer) + L"\x1f" +
+           NormalizeForKey(status);
+}
+
 struct Table {
     std::vector<std::wstring> headers;
     std::vector<std::vector<std::wstring>> rows;
@@ -230,6 +274,27 @@ struct InstalledAppRecord {
     std::wstring name;
     std::wstring version;
     std::wstring publisher;
+};
+
+struct CpuRecord {
+    std::wstring name;
+    std::wstring numberOfCores;
+    std::wstring logicalProcessors;
+    std::wstring maxClockMhz;
+    std::wstring loadPercentage;
+};
+
+struct NetRecord {
+    std::wstring adapter;
+    std::wstring macAddress;
+    std::wstring ipAddresses;
+};
+
+struct DeviceRecord {
+    std::wstring name;
+    std::wstring deviceClass;
+    std::wstring manufacturer;
+    std::wstring status;
 };
 
 bool TryParseWmiSecurity(const std::wstring& input, WmiSecurityConfig& config) {
@@ -523,6 +588,546 @@ bool ExecuteOSInfoQuery(const std::wstring& wmiLocale, const WmiSecurityConfig& 
     pLoc->Release();
     CoUninitialize();
 
+    return true;
+}
+
+bool ExecuteSystemInfoQuery(const std::wstring& wmiLocale, const WmiSecurityConfig& securityConfig) {
+    g_lastNoData = false;
+
+    HRESULT hr = CoInitializeEx(0, COINIT_MULTITHREADED);
+    if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) {
+        std::wcerr << L"[!] COM Initialization failed." << std::endl;
+        return false;
+    }
+
+    CoInitializeSecurity(
+        NULL, -1, NULL, NULL,
+        securityConfig.authnLevel,
+        securityConfig.impLevel,
+        NULL, EOAC_NONE, NULL
+    );
+
+    IWbemLocator* pLoc = NULL;
+    hr = CoCreateInstance(CLSID_WbemLocator, 0, CLSCTX_INPROC_SERVER, IID_IWbemLocator, (LPVOID*)&pLoc);
+    if (FAILED(hr)) {
+        CoUninitialize();
+        return false;
+    }
+
+    IWbemServices* pSvc = NULL;
+    if (wmiLocale.empty()) {
+        hr = pLoc->ConnectServer(_bstr_t(L"ROOT\\CIMV2"), NULL, NULL, 0, NULL, 0, 0, &pSvc);
+    } else {
+        _bstr_t localeBstr(wmiLocale.c_str());
+        hr = pLoc->ConnectServer(_bstr_t(L"ROOT\\CIMV2"), NULL, NULL, localeBstr, NULL, 0, 0, &pSvc);
+    }
+    if (FAILED(hr)) {
+        pLoc->Release();
+        CoUninitialize();
+        return false;
+    }
+
+    CoSetProxyBlanket(
+        pSvc,
+        RPC_C_AUTHN_WINNT,
+        RPC_C_AUTHZ_NONE,
+        NULL,
+        securityConfig.authnLevel,
+        securityConfig.impLevel,
+        NULL,
+        EOAC_NONE
+    );
+
+    auto querySingleRow = [&](const std::wstring& wqlQuery, const std::vector<std::wstring>& props, std::vector<std::wstring>& outValues) -> bool {
+        IEnumWbemClassObject* pEnumerator = NULL;
+        HRESULT qhr = pSvc->ExecQuery(
+            bstr_t("WQL"),
+            bstr_t(wqlQuery.c_str()),
+            WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
+            NULL,
+            &pEnumerator
+        );
+
+        if (FAILED(qhr)) {
+            return false;
+        }
+
+        IWbemClassObject* pclsObj = NULL;
+        ULONG uReturn = 0;
+        qhr = pEnumerator->Next(WBEM_INFINITE, 1, &pclsObj, &uReturn);
+        if (FAILED(qhr) || uReturn == 0) {
+            pEnumerator->Release();
+            return false;
+        }
+
+        outValues.clear();
+        for (const auto& prop : props) {
+            VARIANT vtProp;
+            VariantInit(&vtProp);
+            std::wstring val = L"N/A";
+            if (SUCCEEDED(pclsObj->Get(prop.c_str(), 0, &vtProp, 0, 0))) {
+                val = VariantToString(vtProp);
+            }
+            VariantClear(&vtProp);
+            outValues.push_back(val);
+        }
+
+        pclsObj->Release();
+        pEnumerator->Release();
+        return true;
+    };
+
+    std::vector<std::wstring> computerValues;
+    std::vector<std::wstring> biosValues;
+    bool hasComputer = querySingleRow(
+        L"SELECT Manufacturer, Model, SystemType FROM Win32_ComputerSystem",
+        { L"Manufacturer", L"Model", L"SystemType" },
+        computerValues
+    );
+
+    bool hasBios = querySingleRow(
+        L"SELECT SMBIOSBIOSVersion, SerialNumber FROM Win32_BIOS",
+        { L"SMBIOSBIOSVersion", L"SerialNumber" },
+        biosValues
+    );
+
+    pSvc->Release();
+    pLoc->Release();
+    CoUninitialize();
+
+    if (!hasComputer && !hasBios) {
+        g_lastNoData = true;
+        if (g_outputOptions.format == OutputFormat::Table) {
+            std::wcout << L"  No data available.\n" << std::endl;
+        }
+        return false;
+    }
+
+    std::wstring manufacturer = hasComputer && computerValues.size() > 0 ? computerValues[0] : L"N/A";
+    std::wstring model = hasComputer && computerValues.size() > 1 ? computerValues[1] : L"N/A";
+    std::wstring systemType = hasComputer && computerValues.size() > 2 ? computerValues[2] : L"N/A";
+    std::wstring biosVersion = hasBios && biosValues.size() > 0 ? biosValues[0] : L"N/A";
+    std::wstring serialNumber = hasBios && biosValues.size() > 1 ? biosValues[1] : L"N/A";
+
+    Table table;
+    if (g_outputOptions.format == OutputFormat::Table) {
+        table.headers = { L"Property", L"Value" };
+        table.rows.push_back({ L"Manufacturer", manufacturer });
+        table.rows.push_back({ L"Model", model });
+        table.rows.push_back({ L"System Type", systemType });
+        table.rows.push_back({ L"BIOS Version", biosVersion });
+        table.rows.push_back({ L"Serial Number", serialNumber });
+    } else {
+        table.headers = { L"Manufacturer", L"Model", L"System Type", L"BIOS Version", L"Serial Number" };
+        table.rows.push_back({ manufacturer, model, systemType, biosVersion, serialNumber });
+    }
+
+    table.Print();
+    return true;
+}
+
+bool ExecuteCpuInfoQuery(const std::wstring& wmiLocale, const WmiSecurityConfig& securityConfig) {
+    g_lastNoData = false;
+
+    HRESULT hr = CoInitializeEx(0, COINIT_MULTITHREADED);
+    if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) {
+        std::wcerr << L"[!] COM Initialization failed." << std::endl;
+        return false;
+    }
+
+    CoInitializeSecurity(
+        NULL, -1, NULL, NULL,
+        securityConfig.authnLevel,
+        securityConfig.impLevel,
+        NULL, EOAC_NONE, NULL
+    );
+
+    IWbemLocator* pLoc = NULL;
+    hr = CoCreateInstance(CLSID_WbemLocator, 0, CLSCTX_INPROC_SERVER, IID_IWbemLocator, (LPVOID*)&pLoc);
+    if (FAILED(hr)) {
+        CoUninitialize();
+        return false;
+    }
+
+    IWbemServices* pSvc = NULL;
+    if (wmiLocale.empty()) {
+        hr = pLoc->ConnectServer(_bstr_t(L"ROOT\\CIMV2"), NULL, NULL, 0, NULL, 0, 0, &pSvc);
+    } else {
+        _bstr_t localeBstr(wmiLocale.c_str());
+        hr = pLoc->ConnectServer(_bstr_t(L"ROOT\\CIMV2"), NULL, NULL, localeBstr, NULL, 0, 0, &pSvc);
+    }
+    if (FAILED(hr)) {
+        pLoc->Release();
+        CoUninitialize();
+        return false;
+    }
+
+    CoSetProxyBlanket(
+        pSvc,
+        RPC_C_AUTHN_WINNT,
+        RPC_C_AUTHZ_NONE,
+        NULL,
+        securityConfig.authnLevel,
+        securityConfig.impLevel,
+        NULL,
+        EOAC_NONE
+    );
+
+    IEnumWbemClassObject* pEnumerator = NULL;
+    hr = pSvc->ExecQuery(
+        bstr_t("WQL"),
+        bstr_t(L"SELECT Name, NumberOfCores, NumberOfLogicalProcessors, MaxClockSpeed, LoadPercentage FROM Win32_Processor"),
+        WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
+        NULL,
+        &pEnumerator
+    );
+
+    if (FAILED(hr)) {
+        pSvc->Release();
+        pLoc->Release();
+        CoUninitialize();
+        return false;
+    }
+
+    std::vector<CpuRecord> records;
+    IWbemClassObject* pclsObj = NULL;
+    ULONG uReturn = 0;
+
+    while (pEnumerator) {
+        hr = pEnumerator->Next(WBEM_INFINITE, 1, &pclsObj, &uReturn);
+        if (uReturn == 0) break;
+
+        auto readProp = [&](const wchar_t* propName) -> std::wstring {
+            VARIANT vtProp;
+            VariantInit(&vtProp);
+            std::wstring value = L"N/A";
+            if (SUCCEEDED(pclsObj->Get(propName, 0, &vtProp, 0, 0))) {
+                value = VariantToString(vtProp);
+            }
+            VariantClear(&vtProp);
+            return value;
+        };
+
+        CpuRecord rec;
+        rec.name = readProp(L"Name");
+        rec.numberOfCores = readProp(L"NumberOfCores");
+        rec.logicalProcessors = readProp(L"NumberOfLogicalProcessors");
+        rec.maxClockMhz = readProp(L"MaxClockSpeed");
+        if (rec.maxClockMhz != L"N/A") rec.maxClockMhz += L" MHz";
+        rec.loadPercentage = readProp(L"LoadPercentage");
+        if (rec.loadPercentage != L"N/A") rec.loadPercentage += L"%";
+        records.push_back(rec);
+
+        pclsObj->Release();
+    }
+
+    pEnumerator->Release();
+    pSvc->Release();
+    pLoc->Release();
+    CoUninitialize();
+
+    if (records.empty()) {
+        g_lastNoData = true;
+        if (g_outputOptions.format == OutputFormat::Table) {
+            std::wcout << L"  No data available.\n" << std::endl;
+        }
+        return false;
+    }
+
+    Table table;
+    if (g_outputOptions.format == OutputFormat::Table && records.size() == 1) {
+        table.headers = { L"Property", L"Value" };
+        table.rows.push_back({ L"CPU Name", records[0].name });
+        table.rows.push_back({ L"Physical Cores", records[0].numberOfCores });
+        table.rows.push_back({ L"Logical Processors", records[0].logicalProcessors });
+        table.rows.push_back({ L"Max Clock", records[0].maxClockMhz });
+        table.rows.push_back({ L"Current Load", records[0].loadPercentage });
+    } else {
+        table.headers = { L"CPU", L"Name", L"Physical Cores", L"Logical Processors", L"Max Clock", L"Load" };
+        for (size_t i = 0; i < records.size(); ++i) {
+            std::wstring cpuLabel = L"CPU " + std::to_wstring(i);
+            table.rows.push_back({
+                cpuLabel,
+                records[i].name,
+                records[i].numberOfCores,
+                records[i].logicalProcessors,
+                records[i].maxClockMhz,
+                records[i].loadPercentage
+            });
+        }
+    }
+
+    table.Print();
+    return true;
+}
+
+bool ExecuteNetInfoQuery(const std::wstring& wmiLocale, const WmiSecurityConfig& securityConfig) {
+    g_lastNoData = false;
+
+    HRESULT hr = CoInitializeEx(0, COINIT_MULTITHREADED);
+    if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) {
+        std::wcerr << L"[!] COM Initialization failed." << std::endl;
+        return false;
+    }
+
+    CoInitializeSecurity(
+        NULL, -1, NULL, NULL,
+        securityConfig.authnLevel,
+        securityConfig.impLevel,
+        NULL, EOAC_NONE, NULL
+    );
+
+    IWbemLocator* pLoc = NULL;
+    hr = CoCreateInstance(CLSID_WbemLocator, 0, CLSCTX_INPROC_SERVER, IID_IWbemLocator, (LPVOID*)&pLoc);
+    if (FAILED(hr)) {
+        CoUninitialize();
+        return false;
+    }
+
+    IWbemServices* pSvc = NULL;
+    if (wmiLocale.empty()) {
+        hr = pLoc->ConnectServer(_bstr_t(L"ROOT\\CIMV2"), NULL, NULL, 0, NULL, 0, 0, &pSvc);
+    } else {
+        _bstr_t localeBstr(wmiLocale.c_str());
+        hr = pLoc->ConnectServer(_bstr_t(L"ROOT\\CIMV2"), NULL, NULL, localeBstr, NULL, 0, 0, &pSvc);
+    }
+    if (FAILED(hr)) {
+        pLoc->Release();
+        CoUninitialize();
+        return false;
+    }
+
+    CoSetProxyBlanket(
+        pSvc,
+        RPC_C_AUTHN_WINNT,
+        RPC_C_AUTHZ_NONE,
+        NULL,
+        securityConfig.authnLevel,
+        securityConfig.impLevel,
+        NULL,
+        EOAC_NONE
+    );
+
+    IEnumWbemClassObject* pEnumerator = NULL;
+    hr = pSvc->ExecQuery(
+        bstr_t("WQL"),
+        bstr_t(L"SELECT Description, MACAddress, IPAddress FROM Win32_NetworkAdapterConfiguration WHERE IPEnabled=TRUE"),
+        WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
+        NULL,
+        &pEnumerator
+    );
+
+    if (FAILED(hr)) {
+        pSvc->Release();
+        pLoc->Release();
+        CoUninitialize();
+        return false;
+    }
+
+    std::vector<NetRecord> records;
+    IWbemClassObject* pclsObj = NULL;
+    ULONG uReturn = 0;
+
+    while (pEnumerator) {
+        hr = pEnumerator->Next(WBEM_INFINITE, 1, &pclsObj, &uReturn);
+        if (uReturn == 0) break;
+
+        auto readProp = [&](const wchar_t* propName) -> std::wstring {
+            VARIANT vtProp;
+            VariantInit(&vtProp);
+            std::wstring value = L"N/A";
+            if (SUCCEEDED(pclsObj->Get(propName, 0, &vtProp, 0, 0))) {
+                value = VariantToString(vtProp);
+            }
+            VariantClear(&vtProp);
+            return value;
+        };
+
+        NetRecord rec;
+        rec.adapter = readProp(L"Description");
+        rec.macAddress = readProp(L"MACAddress");
+        rec.ipAddresses = readProp(L"IPAddress");
+        records.push_back(rec);
+
+        pclsObj->Release();
+    }
+
+    pEnumerator->Release();
+    pSvc->Release();
+    pLoc->Release();
+    CoUninitialize();
+
+    if (records.empty()) {
+        g_lastNoData = true;
+        if (g_outputOptions.format == OutputFormat::Table) {
+            std::wcout << L"  No data available.\n" << std::endl;
+        }
+        return false;
+    }
+
+    Table table;
+    if (g_outputOptions.format == OutputFormat::Table && records.size() == 1) {
+        table.headers = { L"Property", L"Value" };
+        table.rows.push_back({ L"Adapter", records[0].adapter });
+        table.rows.push_back({ L"MAC Address", records[0].macAddress });
+
+        std::vector<std::wstring> ipList = SplitAndTrimCommaList(records[0].ipAddresses);
+        if (ipList.empty()) {
+            table.rows.push_back({ L"IP Addresses", records[0].ipAddresses });
+        } else {
+            for (size_t i = 0; i < ipList.size(); ++i) {
+                std::wstring label = (i == 0) ? L"IP Address" : L"";
+                table.rows.push_back({ label, ipList[i] });
+            }
+        }
+    } else {
+        table.headers = { L"Adapter", L"MAC Address", L"IP Addresses" };
+        for (const auto& rec : records) {
+            table.rows.push_back({ rec.adapter, rec.macAddress, rec.ipAddresses });
+        }
+    }
+
+    table.Print();
+    return true;
+}
+
+bool ExecuteDevicesInfoQuery(const std::wstring& wmiLocale, const WmiSecurityConfig& securityConfig) {
+    g_lastNoData = false;
+
+    HRESULT hr = CoInitializeEx(0, COINIT_MULTITHREADED);
+    if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) {
+        std::wcerr << L"[!] COM Initialization failed." << std::endl;
+        return false;
+    }
+
+    CoInitializeSecurity(
+        NULL, -1, NULL, NULL,
+        securityConfig.authnLevel,
+        securityConfig.impLevel,
+        NULL, EOAC_NONE, NULL
+    );
+
+    IWbemLocator* pLoc = NULL;
+    hr = CoCreateInstance(CLSID_WbemLocator, 0, CLSCTX_INPROC_SERVER, IID_IWbemLocator, (LPVOID*)&pLoc);
+    if (FAILED(hr)) {
+        CoUninitialize();
+        return false;
+    }
+
+    IWbemServices* pSvc = NULL;
+    if (wmiLocale.empty()) {
+        hr = pLoc->ConnectServer(_bstr_t(L"ROOT\\CIMV2"), NULL, NULL, 0, NULL, 0, 0, &pSvc);
+    } else {
+        _bstr_t localeBstr(wmiLocale.c_str());
+        hr = pLoc->ConnectServer(_bstr_t(L"ROOT\\CIMV2"), NULL, NULL, localeBstr, NULL, 0, 0, &pSvc);
+    }
+    if (FAILED(hr)) {
+        pLoc->Release();
+        CoUninitialize();
+        return false;
+    }
+
+    CoSetProxyBlanket(
+        pSvc,
+        RPC_C_AUTHN_WINNT,
+        RPC_C_AUTHZ_NONE,
+        NULL,
+        securityConfig.authnLevel,
+        securityConfig.impLevel,
+        NULL,
+        EOAC_NONE
+    );
+
+    IEnumWbemClassObject* pEnumerator = NULL;
+    hr = pSvc->ExecQuery(
+        bstr_t("WQL"),
+        bstr_t(L"SELECT Name, PNPClass, Manufacturer, Status FROM Win32_PnPEntity"),
+        WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
+        NULL,
+        &pEnumerator
+    );
+
+    if (FAILED(hr)) {
+        pSvc->Release();
+        pLoc->Release();
+        CoUninitialize();
+        return false;
+    }
+
+    std::vector<DeviceRecord> records;
+    IWbemClassObject* pclsObj = NULL;
+    ULONG uReturn = 0;
+
+    while (pEnumerator) {
+        hr = pEnumerator->Next(WBEM_INFINITE, 1, &pclsObj, &uReturn);
+        if (uReturn == 0) break;
+
+        auto readProp = [&](const wchar_t* propName) -> std::wstring {
+            VARIANT vtProp;
+            VariantInit(&vtProp);
+            std::wstring value = L"N/A";
+            if (SUCCEEDED(pclsObj->Get(propName, 0, &vtProp, 0, 0))) {
+                value = VariantToString(vtProp);
+            }
+            VariantClear(&vtProp);
+            return value;
+        };
+
+        DeviceRecord rec;
+        rec.name = readProp(L"Name");
+        rec.deviceClass = readProp(L"PNPClass");
+        rec.manufacturer = readProp(L"Manufacturer");
+        rec.status = readProp(L"Status");
+        records.push_back(rec);
+
+        pclsObj->Release();
+    }
+
+    pEnumerator->Release();
+    pSvc->Release();
+    pLoc->Release();
+    CoUninitialize();
+
+    std::set<std::wstring> seen;
+    std::vector<DeviceRecord> uniqueRecords;
+    uniqueRecords.reserve(records.size());
+
+    for (const auto& rec : records) {
+        std::wstring key = BuildDeviceDedupKey(rec.name, rec.deviceClass, rec.manufacturer, rec.status);
+        if (seen.insert(key).second) {
+            uniqueRecords.push_back(rec);
+        }
+    }
+    records.swap(uniqueRecords);
+
+    if (records.empty()) {
+        g_lastNoData = true;
+        if (g_outputOptions.format == OutputFormat::Table) {
+            std::wcout << L"  No data available.\n" << std::endl;
+        }
+        return false;
+    }
+
+    if (g_outputOptions.format == OutputFormat::Table) {
+        for (size_t i = 0; i < records.size(); ++i) {
+            std::wcout << L"\nDevice " << (i + 1) << L":" << std::endl;
+            Table detail;
+            detail.headers = { L"Property", L"Value" };
+            detail.rows.push_back({ L"Name", records[i].name });
+            detail.rows.push_back({ L"Class", records[i].deviceClass });
+            detail.rows.push_back({ L"Manufacturer", records[i].manufacturer });
+            detail.rows.push_back({ L"Status", records[i].status });
+            detail.Print();
+        }
+        return true;
+    }
+
+    Table table;
+    table.headers = { L"Name", L"Class", L"Manufacturer", L"Status" };
+    for (const auto& rec : records) {
+        table.rows.push_back({ rec.name, rec.deviceClass, rec.manufacturer, rec.status });
+    }
+    table.Print();
     return true;
 }
 
@@ -1216,6 +1821,7 @@ void PrintHelp() {
               << L"  apps      - Installed applications\n"
               << L"  apps32    - Installed Win32 applications\n"
               << L"  apps64    - Installed Win64 applications\n"
+              << L"  devices   - Installed Plug-and-Play devices\n"
               << L"  users     - Local user accounts\n"
               << L"  help      - Show this help message\n\n"
               << L"Help options:\n"
@@ -1323,14 +1929,7 @@ int wmain(int argc, wchar_t* argv[]) {
         success = ExecuteOSInfoQuery(wmiLocale, securityConfig);
     } 
     else if (cmd == L"cpu") {
-        success = ExecuteWMIQuery(
-            L"SELECT Name, NumberOfCores, NumberOfLogicalProcessors, MaxClockSpeed, LoadPercentage FROM Win32_Processor",
-            { L"Name", L"NumberOfCores", L"NumberOfLogicalProcessors", L"MaxClockSpeed", L"LoadPercentage" },
-            true,
-            wmiLocale,
-            {},
-            securityConfig
-        );
+        success = ExecuteCpuInfoQuery(wmiLocale, securityConfig);
     } 
     else if (cmd == L"ram") {
         FastRamStatus();
@@ -1367,10 +1966,7 @@ int wmain(int argc, wchar_t* argv[]) {
         );
     }
     else if (cmd == L"net") {
-        success = ExecuteWMIQuery(
-            L"SELECT Description, MACAddress, IPAddress FROM Win32_NetworkAdapterConfiguration WHERE IPEnabled=TRUE",
-            { L"Description", L"MACAddress", L"IPAddress" }, false, wmiLocale, {}, securityConfig
-        );
+        success = ExecuteNetInfoQuery(wmiLocale, securityConfig);
     } 
     else if (cmd == L"gpu") {
         success = ExecuteWMIQuery(
@@ -1484,22 +2080,7 @@ int wmain(int argc, wchar_t* argv[]) {
         );
     }
     else if (cmd == L"sys") {
-        success = ExecuteWMIQuery(
-            L"SELECT Manufacturer, Model, SystemType FROM Win32_ComputerSystem",
-            { L"Manufacturer", L"Model", L"SystemType" },
-            true,
-            wmiLocale,
-            {},
-            securityConfig
-        );
-        success = ExecuteWMIQuery(
-            L"SELECT SMBIOSBIOSVersion, SerialNumber FROM Win32_BIOS",
-            { L"SMBIOSBIOSVersion", L"SerialNumber" },
-            true,
-            wmiLocale,
-            {},
-            securityConfig
-        );
+        success = ExecuteSystemInfoQuery(wmiLocale, securityConfig);
     }
     else if (cmd == L"process") {
         success = ExecuteWMIQuery(
@@ -1542,6 +2123,9 @@ int wmain(int argc, wchar_t* argv[]) {
     }
     else if (cmd == L"apps64" || cmd == L"win64apps") {
         success = PrintInstalledAppsByArchitecture(false, wmiLocale, securityConfig);
+    }
+    else if (cmd == L"devices" || cmd == L"device") {
+        success = ExecuteDevicesInfoQuery(wmiLocale, securityConfig);
     }
     else if (cmd == L"users") {
         success = ExecuteWMIQuery(
