@@ -9,7 +9,7 @@
 `xmic` is a high-performance WMI query utility designed to replace the 
 deprecated Microsoft WMIC utility. Built natively on Windows COM/WMI APIs, 
 it gathers system diagnostics, hardware info, and runtime metrics without 
-heavy dependencies or framework overhead.
+heavy dependencies or .NET framework overhead.
 
 Key Features:
  - Dynamic auto-aligned table layout for all console outputs.
@@ -47,10 +47,38 @@ a portable application.
 
 3. HOW TO EXECUTE
 -------------------------------------------------------------------------------
-Open Command Prompt (cmd.exe) or Windows Termina;, navigate to the folder containing 
+Open Command Prompt (cmd.exe) or Windows Terminal, navigate to the folder containing 
 xmic.exe, and run:
 
-    xmic [--locale <WMI_LOCALE>] [--wmi-security <LEVEL>] [--format <FMT>] [--no-header] <command> [arguments]
+    xmic [--node <HOST>] [--user <USER>] [--password <PASS> | --prompt-password | --prompt-password-confirm] [--domain <DOMAIN>] [--namespace <WMI_NAMESPACE>] [--console-encoding <MODE>] [--locale <WMI_LOCALE>] [--wmi-security <LEVEL>] [--format <FMT>] [--no-header] <command> [arguments]
+
+Optional remote administration target:
+
+    --node <HOST>
+    --user <USER>
+    --password <PASS>
+    --prompt-password
+    --prompt-password-confirm
+    --domain <DOMAIN>
+
+Optional custom WMI namespace/path mode:
+
+    --namespace <WMI_NAMESPACE>
+
+Optional console output encoding mode:
+
+    --console-encoding <MODE>
+
+Allowed MODE values:
+
+    utf16
+    utf8
+
+Example namespace values:
+
+    ROOT\CIMV2
+    ROOT\DEFAULT
+    ROOT\WMI
 
 Optional global locale override:
 
@@ -99,6 +127,13 @@ Quick script mode examples:
 
     xmic --format json os
     xmic --format csv --no-header process
+
+Quick remote administration examples:
+
+    xmic --node SRV-01 os
+    xmic --node SRV-01 --user Administrator --password MyPass123 --domain CONTOSO process
+    xmic --node SRV-01 --user Administrator --prompt-password --domain CONTOSO process
+    xmic --node SRV-01 --user Administrator --prompt-password-confirm --domain CONTOSO process
 
 To view quick inline help inside the command line, run:
 
@@ -366,7 +401,50 @@ EXAMPLES:
     xmic --format csv --no-header query "SELECT Name, State FROM Win32_Service" Name State
 
 
-6. TIPS FOR SCRIPTING & INTEGRATION
+6. REMOTE ADMINISTRATION MODE
+-------------------------------------------------------------------------------
+`xmic` can execute all standard commands against remote hosts using native WMI.
+
+REMOTE SYNTAX:
+     xmic --node <HOST> [--user <USER> --password <PASS> --domain <DOMAIN>] <command>
+
+EXAMPLES:
+1. Query remote OS information:
+    xmic --node SRV-01 os
+
+2. Query remote running services with explicit credentials:
+    xmic --node SRV-01 --user Administrator --password MyPass123 --domain CONTOSO service
+
+3. Run custom query remotely:
+    xmic --node SRV-01 query "SELECT Name,State FROM Win32_Service" Name State
+
+
+7. WMI VERBS & CUSTOM PATH MODE
+-------------------------------------------------------------------------------
+`xmic` supports WMIC-style object verbs through the `path` command.
+Use `--namespace` to target classes or instances outside `ROOT\CIMV2`.
+
+SYNTAX:
+     xmic [--namespace <WMI_NAMESPACE>] path <WMI_CLASS> [where "<WQL_WHERE_CLAUSE>"] get <PROP1,PROP2,...>
+     xmic [--namespace <WMI_NAMESPACE>] path <WMI_CLASS_OR_PATH> call <MethodName> [Param1=Val1 Param2=Val2]
+     xmic [--namespace <WMI_NAMESPACE>] path <WMI_OBJECT_PATH> set <PropertyName>=<Value>
+     xmic [--namespace <WMI_NAMESPACE>] path <WMI_OBJECT_PATH> delete
+
+EXAMPLES:
+1. Get selected process properties:
+    xmic path Win32_Process where "Name='notepad.exe'" get Name,ProcessId,WorkingSetSize
+
+2. Call a class/instance method:
+    xmic path Win32_Process call Create CommandLine="notepad.exe"
+
+3. Set a property on an instance path:
+    xmic --namespace ROOT\CIMV2 path Win32_Service.Name="Spooler" set StartMode=Manual
+
+4. Delete an instance by object path:
+    xmic --namespace ROOT\CIMV2 path Win32_Environment.Name="XMIC_TEST",UserName="<SYSTEM>" delete
+
+
+8. TIPS FOR SCRIPTING & INTEGRATION
 -------------------------------------------------------------------------------
 
 1. EXPORT OUTPUT TO A FILE:
